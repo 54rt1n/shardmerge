@@ -1,0 +1,26 @@
+[tool.poetry]
+name = "shardmerge"
+version = "0.1.0"
+description = ""
+authors = ["Martin <54rt1n@proton.me>"]
+license = "GPL"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+matplotlib = "^3.9.3"
+torch = "^2.5.1"
+aiohttp = "^3.11.10"
+safetensors = "^0.4.5"
+huggingface-hub = "^0.26.5"
+psutil = "^6.1.0"
+transformers = "^4.47.0"
+pandas = "^2.2.3"
+click = "^8.1.7"
+accelerate = ">=0.26.0"
+bitsandbytes = "^0.45.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
