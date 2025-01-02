@@ -204,10 +204,10 @@ class MergeTensorsBase(ABC):
             readme = "No README defined"
             logger.warning("No README defined. Using default.")
         
-        with open(self.output_path / "README.md", "w") as f:
+        with open(self.config.output_path / "README.md", "w") as f:
             f.write(readme)
             
-        logger.info(f"Merge complete. Output saved to {self.output_path}")
+        logger.info(f"Merge complete. Output saved to {self.config.output_path}")
 
     async def _process_layers(self, writer: ModelWriter, shard_layers: List[ShardLayer], device: str):
         """Helper method to process each layer"""
