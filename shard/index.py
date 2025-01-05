@@ -85,7 +85,10 @@ class HFMultiModelIndex:
             return
 
         # Check and see if the model is already in storage:
+        model_path = self.download_manager.storage_path / model_uri
         model_index_path = self.download_manager.storage_path / model_uri / "model.safetensors.index.json"
+        model_path.mkdir(parents=True, exist_ok=True)
+        
         if model_index_path.exists():
             logger.info(f"Model {model_uri} already in storage, loading from {model_index_path}")
             with open(model_index_path, "r") as f:
