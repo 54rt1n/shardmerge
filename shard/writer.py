@@ -180,24 +180,25 @@ class ModelWriter:
             yield shard_layers
             
     @classmethod
-    def from_huggingface(cls, model_id: str, output_path: Path, layer_order: list[str], revision: str = "main"):
+    def from_huggingface(cls, model_id: str, output_path: Path, layer_order: list[str], revision: str = "main", output_astype: torch.dtype = torch.bfloat16):
         """Initialize a ModelWriter by downloading configuration files from Hugging Face.
-        
+
         Args:
             model_id: The Hugging Face model ID (e.g., 'facebook/opt-350m')
             output_path: Where to save the merged model
             layer_order: List of layer names in order
             revision: Model revision/tag to use
-            
+            output_astype: Data type for output tensors
+
         Returns:
             ModelWriter instance initialized with the model's configuration
         """
         # Download only configuration files
         output_path.mkdir(parents=True, exist_ok=True)
-        
+
         allow_patterns = ["*.json", "*.md"]
         ignore_patterns = ["*.bin", "*.safetensors", "*.msgpack"]
-        
+
         snapshot_download(
             repo_id=model_id,
             revision=revision,
@@ -205,19 +206,20 @@ class ModelWriter:
             ignore_patterns=ignore_patterns,
             local_dir=output_path,
         )
-        
+
         # Load the model index
         index_path = output_path / "model.safetensors.index.json"
         if not index_path.exists():
             raise FileNotFoundError(f"Model index not found at {index_path}")
-            
+
         with open(index_path) as f:
             base_index = json.load(f)
-            
+
         return cls(
             base_index=base_index,
             output_path=output_path,
-            layer_order=layer_order
+            layer_order=layer_order,
+            output_astype=output_astype
         )
 
     @classmethod

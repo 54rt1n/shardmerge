@@ -18,7 +18,7 @@ import asyncio
 import logging
 import torch
 
-from .base import MergeTensorsBase
+from .base import MergeTensorsBase, ShardLayer
 from ..config import MergeModel
 
 logger = logging.getLogger(__name__)
@@ -33,32 +33,32 @@ class AdditionMerge(MergeTensorsBase):
     def get_readme(self) -> str:
         return f"""# Merged Model
 
-Base Model: {self.base_model.model}
-Finetuned Models: 
-{chr(10).join('- ' + model.model for model in self.finetune_merge)}
+Base Model: {self.config.output_base_model}
+Finetuned Models:
+{chr(10).join('- ' + model.model for model in self.config.finetune_merge)}
 
 This model was created by computing and combining the delta weights
 from each finetuned model relative to the base model.
 """
 
-    async def _merge_layer(self, layer_name: str, device: str = "cuda") -> torch.Tensor:
+    async def _merge_layer(self, shard_layer: ShardLayer, device: str = "cuda") -> torch.Tensor:
         """Perform the merge operation"""
-        logging.info(f"Processing layer: {layer_name}")
-        
+        logging.info(f"Processing layer: {shard_layer.layer_name}")
+
         # Get base tensor
         base_tensor_promise = self.index_manager.get_tensor(
-            self.base_model.model,
-            layer_name,
+            self.config.output_base_model,
+            shard_layer.layer_name,
             device=device
         )
-        
+
         # Add deltas from each finetuned model
         ft_promises = []
-        for model in self.finetune_merge:
+        for model in self.config.finetune_merge:
             # Get finetuned tensor
             ft_tensor_promise = self.index_manager.get_tensor(
                 model.model,
-                layer_name,
+                shard_layer.layer_name,
                 device=device
             )
             ft_promises.append(ft_tensor_promise.get())

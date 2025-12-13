@@ -48,9 +48,9 @@ class FourierMerge(MergeTensorsBase):
         self.cull_start_pct = cull_start_pct
 
     def get_readme(self) -> str:
-        models = "\n".join(f"- {m.model}" for m in self.finetune_models)
+        models = "\n".join(f"- {m.model}" for m in self.config.finetune_merge)
         return f"""# SLERP-FFT Merged Model
-Base: {self.base_model.model}
+Base: {self.config.output_base_model}
 Models merged:
 {models}
 """
@@ -86,7 +86,7 @@ Models merged:
         
         # Get base tensor
         base_tensor_promise = self.index_manager.get_tensor(
-            self.base_model.model,
+            self.config.output_base_model,
             shard_layer.layer_name,
             device=device
         )
@@ -94,7 +94,7 @@ Models merged:
         # Add deltas from each finetuned model
         ft_promises = []
         for model in self.config.finetune_merge:
-            if not model.use_layer(shard_layer.layer_name):
+            if not model.use_layer_index(shard_layer.layer_number):
                 continue
             # Get finetuned tensor
             ft_tensor_promise = self.index_manager.get_tensor(
@@ -111,7 +111,7 @@ Models merged:
         mean_norms : list[torch.Tensor] = []
         for i, ft_tensor in enumerate(await asyncio.gather(*ft_promises)):
             ft_tensor -= base_tensor
-            model = self.finetune_models[i]
+            model = self.config.finetune_merge[i]
             if model.model in self.task_add_models:
                 add_stack.append((model.model, ft_tensor.cpu().detach()))
             else:
@@ -165,9 +165,9 @@ Models merged:
                         merged = task_arithmetic_fft2(scaled_a, b, t=1.0, agreement=True, device=device)
                         logger.info(f"Arithmetic-FFT Merged {a_key} and {b_key} with norm {norm_a} -> {target_norm} {merged.abs().sum()}")
                     else:
-                        # TODO verify that x and y are in the same order as self.finetune_models
-                        a_weight = self.config.finetune_models[x].alpha
-                        b_weight = self.config.finetune_models[y].alpha
+                        # TODO verify that x and y are in the same order as self.config.finetune_merge
+                        a_weight = self.config.finetune_merge[x].alpha
+                        b_weight = self.config.finetune_merge[y].alpha
                         a_prop = a_weight / (a_weight + b_weight)
                         merged, _, _ = merge_tensors_fft2_slerp(
                             a, b, 
@@ -190,8 +190,8 @@ Models merged:
 
         for model_name, ft_tensor in add_stack:
             ft_tensor = ft_tensor.to(device)
-            merged = task_arithmetic_fft2(result_tensor, ft_tensor, t=1, agreement=False)
-            logger.info(f"Arithmetic Merged {a_key} and {b_key} with weight {1} {merged.sum()}")
+            merged = task_arithmetic_fft2(result_tensor, ft_tensor, t=1, agreement=False, device=device)
+            logger.info(f"Arithmetic Merged {model_name} with weight {1} {merged.sum()}")
             del result_tensor, ft_tensor
             result_tensor = merged.detach()
 

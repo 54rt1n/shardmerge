@@ -181,8 +181,8 @@ def copy_model_command(config_file: Path, revision: str, verbose: bool):
     try:
         # Load configuration
         config = MergeConfig.from_yaml(config_file)
-        input_model = config['input_model']
-        output_path = Path(config['output_path'])
+        input_model = config.input_model.model if config.input_model else config.output_base_model
+        output_path = config.output_path
         
         logger.info(f"Copying model configuration from {input_model} to {output_path}")
         

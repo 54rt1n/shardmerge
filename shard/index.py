@@ -134,70 +134,56 @@ class HFMultiModelIndex:
         logger.info(f"Getting ordered weights for model {model_uri}")
         if model_uri not in self.model_indexes:
             raise KeyError(f"Model {model_uri} not found in index")
-            
+
         index = self.model_indexes[model_uri]
-        
-        # Define standard layer component order
-        layer_component_order = [
-            "input_layernorm.weight",
-            "mlp.down_proj.weight", 
-            "mlp.gate_proj.weight",
-            "mlp.up_proj.weight",
-            "post_attention_layernorm.weight",
-            "self_attn.q_proj.bias",
-            "self_attn.q_proj.weight",
-            "self_attn.k_proj.bias",
-            "self_attn.k_proj.weight",
-            "self_attn.v_proj.bias",
-            "self_attn.v_proj.weight",
-            "self_attn.o_proj.weight",
-        ]
-        
+
         # Get all weight keys
-        weights = [k for k in index["weight_map"].keys()]
-        
+        weights = list(index["weight_map"].keys())
+
         # Separate special weights and layer weights
-        embed_weights = [w for w in weights if "embed_tokens" in w]
+        embed_weights = sorted([w for w in weights if "embed_tokens" in w])
         layer_weights = [w for w in weights if "layers." in w]
-        norm_weights = [w for w in weights if "model.norm.weight" in w]
-        lm_head_weights = [w for w in weights if "lm_head" in w]
-        other_weights = [w for w in weights if w not in (
+        norm_weights = sorted([w for w in weights if "model.norm.weight" in w])
+        lm_head_weights = sorted([w for w in weights if "lm_head" in w])
+        other_weights = sorted([w for w in weights if w not in (
             embed_weights + layer_weights + norm_weights + lm_head_weights
-        )]
-        
-        # Sort layer weights
-        sorted_layer_weights = []
+        )])
+
+        # Discover layer components from layer 0
         layer_nums = sorted(set(
-            int(w.split("layers.")[1].split(".")[0]) 
+            int(w.split("layers.")[1].split(".")[0])
             for w in layer_weights
         ))
-        
+
+        layer_0_prefix = "model.layers.0."
+        layer_0_weights = [w for w in layer_weights if w.startswith(layer_0_prefix)]
+        components = sorted([w.replace(layer_0_prefix, "") for w in layer_0_weights])
+        logger.info(f"Discovered {len(components)} layer components: {components}")
+
+        # Sort layer weights by layer number, then by component order
+        sorted_layer_weights = []
         for layer_num in layer_nums:
             layer_prefix = f"model.layers.{layer_num}."
-            for component in layer_component_order:
+            for component in components:
                 weight_key = layer_prefix + component
-                if weight_key in layer_weights:
-                    sorted_layer_weights.append(weight_key)
-                else:
-                    logger.warning(f"Weight {weight_key} not found in layer {layer_num}: {layer_weights}")
-                    raise Exception("Stop")
-        
+                sorted_layer_weights.append(weight_key)
+
         # Combine all weights in order
         ordered_weights = (
-            embed_weights + 
-            sorted_layer_weights + 
-            norm_weights + 
-            lm_head_weights + 
+            embed_weights +
+            sorted_layer_weights +
+            norm_weights +
+            lm_head_weights +
             other_weights
         )
 
-        logger.info(f"Ordered weights: {ordered_weights}")
-        
         # Verify we haven't lost any weights
         ordered_weights_set = set(ordered_weights)
         weights_set = set(weights)
         if ordered_weights_set != weights_set:
-            raise ValueError(f"Weight ordering lost some weights!: {weights_set - ordered_weights_set}")
+            missing = weights_set - ordered_weights_set
+            extra = ordered_weights_set - weights_set
+            raise ValueError(f"Weight ordering mismatch! Missing: {missing}, Extra: {extra}")
         return ordered_weights
 
     def get_layer_order(self, model_uri: str) -> List[str]:
@@ -365,87 +351,56 @@ class OfflineMultiModelIndex:
         logger.info(f"Getting ordered weights for model {model_id}")
         if model_id not in self.model_indexes:
             raise KeyError(f"Model {model_id} not found in index")
-            
+
         index = self.model_indexes[model_id]
-        
-        # Define standard layer component order (adjust if needed for different architectures)
-        layer_component_order = [
-            "input_layernorm.weight",
-            "mlp.down_proj.weight", 
-            "mlp.gate_proj.weight",
-            "mlp.up_proj.weight",
-            "post_attention_layernorm.weight",
-            "self_attn.q_proj.bias",
-            "self_attn.q_proj.weight",
-            "self_attn.k_proj.bias",
-            "self_attn.k_proj.weight",
-            "self_attn.v_proj.bias",
-            "self_attn.v_proj.weight",
-            "self_attn.o_proj.weight",
-        ]
-        
+
+        # Get all weight keys
         weights = list(index["weight_map"].keys())
-        
+
+        # Separate special weights and layer weights
         embed_weights = sorted([w for w in weights if "embed_tokens" in w])
         layer_weights = [w for w in weights if "layers." in w]
         norm_weights = sorted([w for w in weights if "model.norm.weight" in w])
         lm_head_weights = sorted([w for w in weights if "lm_head" in w])
-        
-        # Extract remaining weights
-        processed_weights = set(embed_weights + layer_weights + norm_weights + lm_head_weights)
-        other_weights = sorted([w for w in weights if w not in processed_weights])
+        other_weights = sorted([w for w in weights if w not in (
+            embed_weights + layer_weights + norm_weights + lm_head_weights
+        )])
 
-        # Sort layer weights by layer number and then component order
-        sorted_layer_weights = []
-        layer_nums = sorted(list(set(
-            int(w.split("layers.")[1].split(".")[0]) 
+        # Discover layer components from layer 0
+        layer_nums = sorted(set(
+            int(w.split("layers.")[1].split(".")[0])
             for w in layer_weights
-        )))
-        
-        layer_weights_set = set(layer_weights) # For faster lookup
+        ))
+
+        layer_0_prefix = "model.layers.0."
+        layer_0_weights = [w for w in layer_weights if w.startswith(layer_0_prefix)]
+        components = sorted([w.replace(layer_0_prefix, "") for w in layer_0_weights])
+        logger.info(f"Discovered {len(components)} layer components: {components}")
+
+        # Sort layer weights by layer number, then by component order
+        sorted_layer_weights = []
         for layer_num in layer_nums:
             layer_prefix = f"model.layers.{layer_num}."
-            found_in_layer = []
-            for component in layer_component_order:
+            for component in components:
                 weight_key = layer_prefix + component
-                if weight_key in layer_weights_set:
-                    sorted_layer_weights.append(weight_key)
-                    found_in_layer.append(weight_key)
-            
-            # Add any layer weights not matching the standard order (e.g., biases if separate)
-            # This part might need refinement depending on model variations
-            layer_specific_weights = [w for w in layer_weights if w.startswith(layer_prefix)]
-            remaining_layer_weights = sorted(list(set(layer_specific_weights) - set(found_in_layer)))
-            if remaining_layer_weights:
-                 logger.debug(f"Found non-standard weights in layer {layer_num}: {remaining_layer_weights}")
-            sorted_layer_weights.extend(remaining_layer_weights)
+                sorted_layer_weights.append(weight_key)
 
-
+        # Combine all weights in order
         ordered_weights = (
-            embed_weights + 
-            sorted_layer_weights + 
-            norm_weights + 
-            lm_head_weights + 
+            embed_weights +
+            sorted_layer_weights +
+            norm_weights +
+            lm_head_weights +
             other_weights
         )
-        
-        # Verification
-        if len(ordered_weights) != len(weights):
-             logger.warning(f"Weight ordering mismatch for {model_id}. "
-                            f"Expected {len(weights)}, got {len(ordered_weights)}. "
-                            f"Lost: {set(weights) - set(ordered_weights)}, "
-                            f"Added: {set(ordered_weights) - set(weights)}")
-             # Fallback to simple sort if ordering fails significantly
-             if abs(len(ordered_weights) - len(weights)) > 10: # Arbitrary threshold
-                 logger.warning("Falling back to simple alphabetical sort for weights.")
-                 return sorted(weights)
 
-        if set(ordered_weights) != set(weights):
-             logger.warning(f"Weight ordering resulted in different set of weights for {model_id}. "
-                            f"Lost: {set(weights) - set(ordered_weights)}, "
-                            f"Added: {set(ordered_weights) - set(weights)}. Using ordered list anyway.")
-
-        #logger.debug(f"Ordered weights for {model_id}: {ordered_weights}")
+        # Verify we haven't lost any weights
+        ordered_weights_set = set(ordered_weights)
+        weights_set = set(weights)
+        if ordered_weights_set != weights_set:
+            missing = weights_set - ordered_weights_set
+            extra = ordered_weights_set - weights_set
+            raise ValueError(f"Weight ordering mismatch! Missing: {missing}, Extra: {extra}")
         return ordered_weights
 
     def get_layer_order(self, model_id: str) -> List[str]:
