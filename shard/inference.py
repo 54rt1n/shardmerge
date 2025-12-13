@@ -14,13 +14,32 @@
 # You should have received a copy of the GNU Lesser General Public License
 # along with this program. If not, see http://www.gnu.org/licenses/.
 
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel, PreTrainedTokenizerBase
 import torch
 from typing import Optional
+import gc
+from dataclasses import dataclass
+import json
 
+@dataclass
+class ChatMessage:
+    role: str
+    content: str
+
+    def to_dict(self):
+        """Return the dictionary representation of the message"""
+        return {"role": self.role, "content": self.content}
+
+    def __str__(self):
+        """The JSON representation of the message"""
+        return json.dumps(self.to_dict())
 
 class InferenceEngine:
-    def __init__(self, model, tokenizer, device):
+    model: PreTrainedModel
+    tokenizer: PreTrainedTokenizerBase
+    device: str
+
+    def __init__(self, model: PreTrainedModel, tokenizer: PreTrainedTokenizerBase, device: str):
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
@@ -29,6 +48,19 @@ class InferenceEngine:
         self.tokenizer.padding_side = "left"
         if not self.tokenizer.pad_token:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        print(f"Unloading model and tokenizer from {self.device}...")
+        del self.model
+        del self.tokenizer
+        gc.collect()
+        torch.cuda.empty_cache()
+        memory_usage = torch.cuda.memory_allocated() / 1024**2
+        print(f"Memory usage: {memory_usage:.2f} MB")
+        print("Resources released.")
 
     @classmethod
     def from_pretrained(
@@ -93,7 +125,10 @@ class InferenceEngine:
         temperature=0.7,
         top_p=0.95,
         top_k=40,
-        repetition_penalty=1.1
+        repetition_penalty=1.1,
+        use_template: bool = True,
+        system_prompt: Optional[str] = None,
+        previous_messages: Optional[list[ChatMessage]] = None,
     ):
         """
         Stream generate text from the model token by token
@@ -105,16 +140,37 @@ class InferenceEngine:
             top_p (float): Nucleus sampling parameter
             top_k (int): Top-k sampling parameter
             repetition_penalty (float): Penalty for repeating tokens
+            use_template (bool): Whether to apply the chat template with a 'user' role.
             
         Yields:
             str: Generated text chunks
         """
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        if use_template:
+            # Build a list of ChatMessage objects first
+            raw_messages: list[ChatMessage] = []
+            if system_prompt:
+                raw_messages.append(ChatMessage(role="system", content=system_prompt))
+            if previous_messages:
+                raw_messages.extend(previous_messages)
+            raw_messages.append(ChatMessage(role="user", content=prompt))
+            
+            # Convert all messages to dictionaries for the template
+            messages = [msg.to_dict() for msg in raw_messages]
+
+            inputs = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_tensors="pt"
+            ).to(self.device)
+        else:
+            inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         
         # Create empty past key values
         past_key_values = None
-        input_ids = inputs["input_ids"]
-        
+        # Ensure inputs are correctly handled whether from tokenizer or template
+        input_ids = inputs if isinstance(inputs, torch.Tensor) else inputs["input_ids"]
+
         for _ in range(max_new_tokens):
             with torch.no_grad():
                 outputs = self.model(

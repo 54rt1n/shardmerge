@@ -288,3 +288,287 @@ class HFMultiModelIndex:
         if model_uri not in self.model_indexes:
             raise KeyError(f"Model {model_uri} not found in index")
         return set(self.model_indexes[model_uri]["weight_map"].keys())
+
+# New class for offline-only index management
+class OfflineMultiModelIndex:
+    """Manages index and weight file mappings for multiple HuggingFace models stored locally."""
+    
+    def __init__(self):
+        self.model_paths: Dict[str, Path] = {} # Stores model_id -> model_directory_path
+        self.model_indexes: Dict[str, Dict] = {}
+        self.model_shards: Dict[str, Dict[str, ModelShard]] = {}
+        self._tensor_downloads: Dict[Tuple[str, str], torch.Tensor] = {} # In-memory cache once loaded
+        self._ordered_weights: Dict[str, List[str]] = {}
+        logger.info("OfflineMultiModelIndex initialized.")
+
+    def add_model(self, model_path: Path):
+        """Add a model to the index from its local directory path."""
+        if not model_path.is_dir():
+            raise NotADirectoryError(f"Provided model path is not a directory: {model_path}")
+            
+        model_id = model_path.name # Use directory name as the unique ID
+        if model_id in self.model_indexes:
+            logger.warning(f"Model '{model_id}' already added. Skipping.")
+            return
+
+        model_index_path = model_path / "model.safetensors.index.json"
+        
+        if not model_index_path.exists():
+            raise FileNotFoundError(f"Index file 'model.safetensors.index.json' not found in {model_path}")
+
+        logger.info(f"Loading index for model '{model_id}' from: {model_index_path}")
+        with open(model_index_path, "r") as f:
+            try:
+                index = json.load(f)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Failed to parse index file {model_index_path}: {e}")
+
+        self.model_paths[model_id] = model_path
+        self.model_indexes[model_id] = index
+        
+        # Initialize shard mapping for this model
+        shard_contents: Dict[str, List[str]] = {}
+        if "weight_map" not in index:
+             raise ValueError(f"Index file for '{model_id}' missing 'weight_map' key.")
+             
+        for tensor_name, shard_file in index["weight_map"].items():
+            if shard_file not in shard_contents:
+                shard_contents[shard_file] = []
+            shard_contents[shard_file].append(tensor_name)
+            
+        # Create ModelShard objects
+        self.model_shards[model_id] = {}
+        for shard_file, tensor_keys in shard_contents.items():
+            # local_path is now implicitly model_path / shard_file, set during load
+            self.model_shards[model_id][shard_file] = ModelShard(
+                filename=shard_file,
+                contained_keys=tensor_keys,
+                weight_map={k: shard_file for k in tensor_keys},
+                local_path=None # Will be set in _load_tensor if needed, or just used directly
+            )
+            
+        # Cache ordered weights for this model
+        try:
+            self._ordered_weights[model_id] = self._get_ordered_weights(model_id)
+        except Exception as e:
+            logger.error(f"Failed to determine ordered weights for {model_id}: {e}. Removing model.")
+            # Clean up partially added model
+            del self.model_paths[model_id]
+            del self.model_indexes[model_id]
+            del self.model_shards[model_id]
+            raise # Re-raise the exception
+            
+        logger.info(f"Initialized {len(shard_contents)} shards for model '{model_id}' from {model_path}")
+
+    def _get_ordered_weights(self, model_id: str) -> List[str]:
+        """Get weight keys in their exact order (best effort based on common patterns)."""
+        logger.info(f"Getting ordered weights for model {model_id}")
+        if model_id not in self.model_indexes:
+            raise KeyError(f"Model {model_id} not found in index")
+            
+        index = self.model_indexes[model_id]
+        
+        # Define standard layer component order (adjust if needed for different architectures)
+        layer_component_order = [
+            "input_layernorm.weight",
+            "mlp.down_proj.weight", 
+            "mlp.gate_proj.weight",
+            "mlp.up_proj.weight",
+            "post_attention_layernorm.weight",
+            "self_attn.q_proj.bias",
+            "self_attn.q_proj.weight",
+            "self_attn.k_proj.bias",
+            "self_attn.k_proj.weight",
+            "self_attn.v_proj.bias",
+            "self_attn.v_proj.weight",
+            "self_attn.o_proj.weight",
+        ]
+        
+        weights = list(index["weight_map"].keys())
+        
+        embed_weights = sorted([w for w in weights if "embed_tokens" in w])
+        layer_weights = [w for w in weights if "layers." in w]
+        norm_weights = sorted([w for w in weights if "model.norm.weight" in w])
+        lm_head_weights = sorted([w for w in weights if "lm_head" in w])
+        
+        # Extract remaining weights
+        processed_weights = set(embed_weights + layer_weights + norm_weights + lm_head_weights)
+        other_weights = sorted([w for w in weights if w not in processed_weights])
+
+        # Sort layer weights by layer number and then component order
+        sorted_layer_weights = []
+        layer_nums = sorted(list(set(
+            int(w.split("layers.")[1].split(".")[0]) 
+            for w in layer_weights
+        )))
+        
+        layer_weights_set = set(layer_weights) # For faster lookup
+        for layer_num in layer_nums:
+            layer_prefix = f"model.layers.{layer_num}."
+            found_in_layer = []
+            for component in layer_component_order:
+                weight_key = layer_prefix + component
+                if weight_key in layer_weights_set:
+                    sorted_layer_weights.append(weight_key)
+                    found_in_layer.append(weight_key)
+            
+            # Add any layer weights not matching the standard order (e.g., biases if separate)
+            # This part might need refinement depending on model variations
+            layer_specific_weights = [w for w in layer_weights if w.startswith(layer_prefix)]
+            remaining_layer_weights = sorted(list(set(layer_specific_weights) - set(found_in_layer)))
+            if remaining_layer_weights:
+                 logger.debug(f"Found non-standard weights in layer {layer_num}: {remaining_layer_weights}")
+            sorted_layer_weights.extend(remaining_layer_weights)
+
+
+        ordered_weights = (
+            embed_weights + 
+            sorted_layer_weights + 
+            norm_weights + 
+            lm_head_weights + 
+            other_weights
+        )
+        
+        # Verification
+        if len(ordered_weights) != len(weights):
+             logger.warning(f"Weight ordering mismatch for {model_id}. "
+                            f"Expected {len(weights)}, got {len(ordered_weights)}. "
+                            f"Lost: {set(weights) - set(ordered_weights)}, "
+                            f"Added: {set(ordered_weights) - set(weights)}")
+             # Fallback to simple sort if ordering fails significantly
+             if abs(len(ordered_weights) - len(weights)) > 10: # Arbitrary threshold
+                 logger.warning("Falling back to simple alphabetical sort for weights.")
+                 return sorted(weights)
+
+        if set(ordered_weights) != set(weights):
+             logger.warning(f"Weight ordering resulted in different set of weights for {model_id}. "
+                            f"Lost: {set(weights) - set(ordered_weights)}, "
+                            f"Added: {set(ordered_weights) - set(weights)}. Using ordered list anyway.")
+
+        #logger.debug(f"Ordered weights for {model_id}: {ordered_weights}")
+        return ordered_weights
+
+    def get_layer_order(self, model_id: str) -> List[str]:
+        """Get weight keys in their determined order for a model."""
+        if model_id not in self._ordered_weights:
+            # Attempt to generate if not already done (e.g., if add_model failed during ordering)
+             try:
+                 self._ordered_weights[model_id] = self._get_ordered_weights(model_id)
+             except Exception as e:
+                 raise KeyError(f"Model {model_id} not found or ordering failed: {e}")
+        return self._ordered_weights[model_id].copy()
+
+    def get_tensor(self, model_id: str, tensor_name: str, device: str = "cpu") -> TensorPromise:
+        """Get a promise for a tensor by name from a specific locally stored model."""
+        # We use model_id (directory name) instead of model_uri here
+        if model_id not in self.model_indexes:
+            raise KeyError(f"Model ID '{model_id}' not found in index. Add the model using add_model(Path(...)) first.")
+            
+        index = self.model_indexes[model_id]
+        if tensor_name not in index["weight_map"]:
+            raise KeyError(f"Tensor '{tensor_name}' not found in model '{model_id}'")
+
+        logger.debug(f"Requesting tensor '{tensor_name}' from model '{model_id}' on device '{device}'")
+            
+        # Create promise for this tensor
+        # Pass model_id instead of model_uri to TensorPromise if its logic needs it
+        promise = TensorPromise(model_id, tensor_name, device) 
+        
+        # Check if tensor is already loaded into memory cache
+        tensor_key = (model_id, tensor_name)
+        if tensor_key in self._tensor_downloads:
+            logger.debug(f"Tensor '{tensor_name}' found in memory cache for model '{model_id}'.")
+            promise.set_result(self._tensor_downloads[tensor_key].to(device))
+            return promise
+
+        # Get shard info
+        shard_name = index["weight_map"][tensor_name]
+        shard_key = (model_id, shard_name) # (model_id, shard_filename)
+
+        # Start async task to load the tensor from disk
+        logger.debug(f"Tensor '{tensor_name}' not in cache. Scheduling load from shard '{shard_name}' for model '{model_id}'.")
+        asyncio.create_task(self._load_tensor(promise, shard_key))
+        return promise
+
+    async def _load_tensor(self, promise: TensorPromise, shard_key: Tuple[str, str]):
+        """Async task to load a tensor from local disk and fulfill its promise."""
+        model_id, shard_name = shard_key
+        
+        try:
+            # Construct the full path to the shard file
+            model_base_path = self.model_paths.get(model_id)
+            if not model_base_path:
+                 # This should not happen if add_model succeeded
+                 raise RuntimeError(f"Internal error: Base path for model_id '{model_id}' not found.")
+                 
+            local_shard_path = model_base_path / shard_name
+            
+            if not local_shard_path.exists():
+                raise FileNotFoundError(f"Shard file not found: {local_shard_path}")
+                
+            logger.debug(f"Loading tensor '{promise.tensor_name}' from local file: {local_shard_path}")
+
+            # Load tensor from shard using safetensors
+            # This operation itself is blocking disk I/O, but run within an async task
+            # Consider using asyncio.to_thread for very large files if blocking becomes an issue
+            from safetensors import safe_open
+            
+            # Using asyncio.to_thread to avoid blocking the event loop during file I/O
+            def load_from_safetensors():
+                with safe_open(local_shard_path, framework="pt", device="cpu") as f: # Load to CPU first
+                    return f.get_tensor(promise.tensor_name)
+
+            tensor = await asyncio.to_thread(load_from_safetensors)
+
+            # Store in memory cache and fulfill the promise
+            tensor_key = (model_id, promise.tensor_name)
+            self._tensor_downloads[tensor_key] = tensor # Keep CPU copy in cache
+            logger.debug(f"Successfully loaded tensor '{promise.tensor_name}' from '{shard_name}'.")
+            promise.set_result(tensor.to(promise.device)) # Move to target device for the caller
+
+        except Exception as e:
+            logger.exception(f"Failed to load tensor '{promise.tensor_name}' from model '{model_id}', shard '{shard_name}' ({local_shard_path})")
+            promise.set_exception(e)
+
+    def get_model_keys(self, model_id: str) -> Set[str]:
+        """Get all available tensor names for a locally stored model."""
+        if model_id not in self.model_indexes:
+            raise KeyError(f"Model ID '{model_id}' not found in index.")
+        return set(self.model_indexes[model_id]["weight_map"].keys())
+
+    def __contains__(self, model_id: str) -> bool:
+        """Check if a model ID is present in the index."""
+        return model_id in self.model_indexes
+
+    def __len__(self) -> int:
+        """Return the number of models in the index."""
+        return len(self.model_indexes)
+
+# Example Usage (conceptual):
+# async def main():
+#     index = OfflineMultiModelIndex()
+#     try:
+#         index.add_model(Path("./models/my-llama-model"))
+#         index.add_model(Path("/path/to/another-model"))
+#     except (FileNotFoundError, NotADirectoryError, ValueError) as e:
+#         print(f"Error adding model: {e}")
+#         return
+        
+#     if "my-llama-model" in index:
+#         try:
+#             tensor_promise = index.get_tensor("my-llama-model", "model.layers.0.self_attn.q_proj.weight", device="cuda:0")
+#             tensor = await tensor_promise.get()
+#             print("Tensor loaded:", tensor.shape, tensor.device)
+            
+#             layer_order = index.get_layer_order("my-llama-model")
+#             print("Layer order sample:", layer_order[:5])
+            
+#         except KeyError as e:
+#             print(f"Error getting tensor or layer order: {e}")
+#         except Exception as e:
+#             print(f"Error loading tensor: {e}")
+
+# if __name__ == "__main__":
+#    # Setup logging basic config if needed
+#    logging.basicConfig(level=logging.INFO) 
+#    # asyncio.run(main())

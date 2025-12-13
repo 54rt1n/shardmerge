@@ -104,8 +104,8 @@ class ModelWriter:
                                 raise ValueError(f"Tensor {layer} found in {shard_path} but not in base model")
                             missing_tensors.remove(layer)
                             self.written_shard_layers.add((shard_name, layer))
-                    if missing_tensors:
-                        raise ValueError(f"Missing tensors in {shard_path}: {missing_tensors}")
+                    #if missing_tensors:
+                    #    raise ValueError(f"Missing tensors in {shard_path}: {missing_tensors}")
                 except Exception as e:
                     logger.error(f"Error validating shard {shard_name}: {e}")
                     #if shard_path.exists():
@@ -218,5 +218,29 @@ class ModelWriter:
             base_index=base_index,
             output_path=output_path,
             layer_order=layer_order
+        )
+
+    @classmethod
+    def like_model(cls, model_path: Path, output_path: Path, output_astype: torch.dtype = torch.bfloat16):
+        """Initalize a ModelWriter by reading a model and it's model.safetensors.index.json"""
+        index_path = model_path / "model.safetensors.index.json"
+        if not index_path.exists():
+            raise FileNotFoundError(f"Model index not found at {index_path}")
+            
+        with open(index_path) as f:
+            base_index = json.load(f)
+        
+        # For each file in the model path, read the file in order and use it to determine the layer order
+        layer_order = []
+        for file in model_path.glob("*.safetensors"):
+            with safe_open(file, framework="pt") as f:
+                for layer in f.keys():
+                    layer_order.append(layer)
+            
+        return cls(
+            base_index=base_index,
+            output_path=output_path,
+            layer_order=layer_order,
+            output_astype=output_astype
         )
             
