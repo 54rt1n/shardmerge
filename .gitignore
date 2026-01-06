@@ -3,3 +3,5 @@ __pycache__
 local
 cache
 storage
+output_model
+uv.lock
