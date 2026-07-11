@@ -52,10 +52,13 @@ def fft_transform(tensor: torch.Tensor, device: str) -> torch.Tensor:
     Returns:
     - torch.Tensor: FFT of the input tensor.
     """
+    # Keep the result on the compute device; the caller is responsible for
+    # moving the final merged tensor back to CPU. Round-tripping every
+    # transform through host memory was starving the GPU.
     if tensor.ndim == 1:
-        return torch.fft.fft(tensor.to(device).to(torch.float32)).to("cpu")
+        return torch.fft.fft(tensor.to(device).to(torch.float32))
     else:
-        return torch.fft.fftn(tensor.to(device).to(torch.float32), dim=(-2, -1)).to("cpu")
+        return torch.fft.fftn(tensor.to(device).to(torch.float32), dim=(-2, -1))
 
 def ifft_transform(tensor: torch.Tensor, device: str) -> torch.Tensor:
     """
@@ -67,10 +70,11 @@ def ifft_transform(tensor: torch.Tensor, device: str) -> torch.Tensor:
     Returns:
     - torch.Tensor: Inverse FFT of the input tensor.
     """
+    # Stay on the compute device (see fft_transform).
     if tensor.ndim == 1:
-        return torch.fft.ifft(tensor.to(device)).real.to("cpu")
+        return torch.fft.ifft(tensor.to(device)).real
     else:
-        return torch.fft.ifftn(tensor.to(device), dim=(-2, -1)).real.to("cpu")
+        return torch.fft.ifftn(tensor.to(device), dim=(-2, -1)).real
 
 def normalize_tensor(tensor: torch.Tensor, device: str) -> tuple[torch.Tensor, float]:
     """
@@ -268,7 +272,7 @@ def arithmetic_fft_components(v0_fft: torch.Tensor, v1_fft: torch.Tensor, t: flo
     - torch.Tensor: Resulting FFT components after applying the arithmetic task.
     """
     with cuda_memory_profiler(display=False):
-        result_fft = torch.zeros_like(v0_fft, device="cpu")
+        result_fft = torch.zeros_like(v0_fft, device=device)
 
         logger.debug("sign_mask")
         if agreement:
@@ -281,7 +285,7 @@ def arithmetic_fft_components(v0_fft: torch.Tensor, v1_fft: torch.Tensor, t: flo
         logger.debug("summed")
         larger_values_mask = (v0_fft.real.abs() > v0_fft.real.abs())
 
-        result_fft.real[~sign_mask] = torch.where(larger_values_mask[~sign_mask], v0_fft.real[~sign_mask], v1_fft.real[~sign_mask]).to("cpu")
+        result_fft.real[~sign_mask] = torch.where(larger_values_mask[~sign_mask], v0_fft.real[~sign_mask], v1_fft.real[~sign_mask])
         logger.debug("masked")
         del sign_mask, larger_values_mask
 

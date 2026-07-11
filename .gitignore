@@ -5,3 +5,9 @@ cache
 storage
 output_model
 uv.lock
+models
+research
+mise.toml
+codedb.snapshot
+out
+configs

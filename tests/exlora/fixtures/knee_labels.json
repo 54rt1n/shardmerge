@@ -1,0 +1,22 @@
+{
+  "meromero": {
+    "kind": "low_rank",
+    "rank": 64
+  },
+  "gutenberg": {
+    "kind": "low_rank",
+    "rank": 64
+  },
+  "egan": {
+    "kind": "dense",
+    "rank": 0
+  },
+  "equinox": {
+    "kind": "dense",
+    "rank": 0
+  },
+  "heretic": {
+    "kind": "low_rank",
+    "rank": 1
+  }
+}
