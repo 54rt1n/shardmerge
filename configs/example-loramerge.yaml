@@ -1,0 +1,52 @@
+# Example config for a full-frame loramerge (extracted-artifact merge):
+#   uv run python -m shard.loramerge.runner --config configs/example-loramerge.yaml --dry-run
+#
+# Merges extracted sources (PEFT LoRAs, dense/NVFP4 ExLoRA artifacts,
+# checkpoint deltas) onto a base model in fp32. All fields map to
+# LoraMergeConfig / LoraMergeSourceConfig (see shard/loramerge/config.py).
+#
+# Source fields worth knowing:
+#   kind        peft | dense | nvfp4_residual | checkpoint | model (io passthrough)
+#   weight      mixture weight in the merge rule
+#   rescale     multiplies the source's delta MAGNITUDE. Sources can span orders
+#               of magnitude; balance ‖Δ‖ across them (check with --dry-run)
+#               before folding, or the largest source dominates the rotation.
+#   priority    fold order: highest first anchors the accumulator
+#   group       sources sharing a group merge into each other first
+#   post_merge  held out of the body fold, applied against the final body
+#               (blended at final_merge_t; additive overlay under isometric)
+
+base_model: "google/gemma-4-31B-it"
+output_dir: "out/loramerge/example-isometry"
+
+merge_rule: "isometric"  # sum | sign_vote | norm_slerp | fourier_slerp | fft_slerp | isometric
+isometric_rank: 64       # joint-subspace rank per source
+isometric_energy: 0.7    # radial magnitude reintroduced (0 = pure rotation)
+final_merge_t: 0.5       # strength of post_merge overlays
+arithmetic_dtype: "float32"
+output_dtype: "bfloat16"
+scaffold_format: "nvfp4_residual"   # none | nvfp4_residual
+
+target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+
+sources:
+  # Dense NVFP4 delta maps extracted with shard.exlora (artifact_type: nvfp4_residual).
+  # Paths resolve relative to storage_dir. rescale values here are illustrative —
+  # re-derive them for your sources with --dry-run.
+  - { name: "sft-a",    path: "deltas/sft-a",    kind: "nvfp4_residual", weight: 1.0, rescale: 1.0, priority: 2.0 }
+  - { name: "sft-b",    path: "deltas/sft-b",    kind: "nvfp4_residual", weight: 1.0, rescale: 1.0, priority: 1.5 }
+
+  # A PEFT LoRA adapter extracted with shard.exlora (artifact_type: lora)
+  - { name: "reasoning", path: "loras/reasoning-adapter", kind: "peft", weight: 1.0, rescale: 1.0, priority: 1.0 }
+
+  # A surgical overlay applied once against the consolidated body
+  - { name: "style", path: "loras/style-adapter", kind: "peft", weight: 0.5, post_merge: true }
+
+  # IO passthroughs (not merge deltas): take embeddings or lm_head from
+  # another model instead of the base.
+  # - { name: "head-donor", model: "org/head-only-model", kind: "model", is_lm_head: true }
+
+device: "cuda"
+storage_dir: "models"
+cache_dir: "cache"
+clean_cache: false

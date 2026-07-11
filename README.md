@@ -24,11 +24,20 @@ A powerful tool for merging multiple finetuned LLM models by computing and combi
 uv sync
 ```
 
+## Documentation
+
+See [docs/OVERVIEW.md](docs/OVERVIEW.md) for a tour of the modules: the core
+shard-streaming merge pipeline (`shard`), merge operators (`shard.merge`),
+delta patching primitives (`shard.delta`), ExLoRA extraction (`shard.exlora`),
+rank validation (`shard.ranker`), artifact merging (`shard.loramerge`), and
+adapter scoring (`shard.loraplay`).
+
 ## Usage
 
 ### Merge Models
 
-Create a YAML configuration file:
+Create a YAML configuration file (a ready-to-edit copy lives at
+[configs/example-merge.yaml](configs/example-merge.yaml)):
 
 ```yaml
 output_base_model: "unsloth/Meta-Llama-3.1-70B-Instruct"
@@ -53,6 +62,7 @@ Options:
 - `--verbose`: Enable detailed logging
 - `--cache-dir PATH`: Override cache directory
 - `--device cuda|cpu`: Override compute device
+- `--clean_cache`: Delete cached shards after merging
 
 ### Using Local Models
 
@@ -85,8 +95,10 @@ Options:
 - `--temperature F`: Sampling temperature (default: 0.7)
 - `--top-p F`: Nucleus sampling parameter (default: 0.95)
 - `--top-k N`: Top-k sampling parameter (default: 40)
+- `--repetition-penalty F`: Penalty for repeating tokens (default: 1.1)
 - `-4` / `--load-in-4bit`: Load model in 4-bit precision
 - `-8` / `--load-in-8bit`: Load model in 8-bit precision
+- `--device cuda|cpu`: Override compute device
 
 ### Extract ExLoRA Adapters
 
@@ -101,10 +113,11 @@ It supports two artifact families:
 - `lora`: PEFT-compatible SVD factors for the coherent super-floor signal.
 - `nvfp4_residual`: dense NVFP4 delta map plus optional floor correction and sparse residual sidecar.
 
-Run extraction with:
+Run extraction with (starter config at
+[configs/example-exlora.yaml](configs/example-exlora.yaml)):
 
 ```bash
-uv run python -m shard.exlora extract configs/my-exlora.yaml
+uv run python -m shard.exlora extract configs/example-exlora.yaml
 ```
 
 The extractor writes an `EXTRACTION_REPORT.md` beside the artifact. The report includes per-layer ranks/errors plus summaries by module, depth bucket, and module x depth bucket.
@@ -155,7 +168,7 @@ Do not use this as the default QAT artifact. The Gemma QAT behavior gate showed 
 
 #### NVFP4 Floor-Corrected Config
 
-Use this when the dense floor carries behavior or when rank alone is not the right storage axis. This is the default branch for QAT survival maps unless a LoRA head passes the behavior gate:
+Use this when the dense floor carries behavior or when rank alone is not the right storage axis. This is the default branch for QAT survival maps unless a LoRA head passes the behavior gate (starter config at [configs/example-nvfp4.yaml](configs/example-nvfp4.yaml)):
 
 ```yaml
 base_model: "google/gemma-4-31B-it"

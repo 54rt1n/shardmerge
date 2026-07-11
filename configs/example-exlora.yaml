@@ -1,0 +1,32 @@
+# Example config for ExLoRA extraction (natural-rank LoRA artifact):
+#   uv run python -m shard.exlora extract configs/example-exlora.yaml
+#
+# All fields map to ExtractConfig (see shard/exlora/config.py).
+# For dense QAT-style deltas use artifact_type: "nvfp4_residual" instead —
+# see the README for that variant.
+
+base_model: "path/to/base"
+finetune_model: "path/to/finetune"
+output_dir: "out/loras/my-adapter"
+
+artifact_type: "lora"           # lora | nvfp4_residual
+
+target_error: 0.00001
+min_rank: 1
+max_rank: 512
+rank_policy: "error_or_signal"  # error | signal | error_or_signal
+noise_floor_multiplier: 1.5
+min_knee_drop: 1.25
+tail_fraction: 0.25
+
+target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+
+position_policy_enabled: true
+position_early_fraction: 0.20
+position_late_fraction: 0.75
+
+device: "cuda"
+dtype: "bfloat16"
+storage_dir: "models"
+cache_dir: "cache"
+clean_cache: false

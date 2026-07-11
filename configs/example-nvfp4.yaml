@@ -1,0 +1,34 @@
+# Example config for ExLoRA NVFP4 floor-corrected extraction:
+#   uv run python -m shard.exlora extract configs/example-nvfp4.yaml
+#
+# Use this when the dense floor carries behavior (e.g. QAT survival maps)
+# and rank alone is not the right storage axis. The pipeline quantizes the
+# delta to NVFP4, floor-corrects the codec error, then spends a sparse
+# residual sidecar only on blocks above the fitted codec floor.
+# All fields map to ExtractConfig (see shard/exlora/config.py).
+
+base_model: "path/to/base"
+finetune_model: "path/to/dense-finetune"
+output_dir: "out/delta-maps/my-nvfp4"
+
+artifact_type: "nvfp4_residual"
+
+nvfp4_extra_bpe: 1.0
+nvfp4_residual_dtype: "bfloat16"
+nvfp4_index_bits: 32
+nvfp4_selection_policy: "floor_effect"       # residual_rms | floor_effect
+nvfp4_floor_correction: "code_position_mean" # none | code_position_mean
+nvfp4_floor_tolerance: 1.0
+nvfp4_floor_effect_threshold: 2.0
+
+target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+
+# If the finetune changed embeddings/head too (e.g. QAT touches all weights):
+# extract_embeddings: true
+# extract_lm_head: true
+
+device: "cuda"
+dtype: "bfloat16"
+storage_dir: "models"
+cache_dir: "cache"
+clean_cache: false

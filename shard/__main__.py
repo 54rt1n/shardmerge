@@ -113,24 +113,24 @@ def merge_command(
     """
     Merge multiple finetuned models by computing and combining their deltas.
     
-    CONFIG_FILE should be a YAML file with the following structure:
-    
+    CONFIG_FILE should be a YAML file with the following structure
+    (see configs/example-merge.yaml):
+
     \b
-    base_model:
-      model: "unsloth/Meta-Llama-3.1-70B-Instruct"
-      alpha: 1.0
-      is_input: false
-      is_output: false
-      start_layer: 0
-      end_layer: -1
+    output_base_model: "unsloth/Meta-Llama-3.1-70B-Instruct"
+    output_dtype: "bfloat16"
     finetune_merge:
       - model: "nvidia/Llama-3.1-Nemotron-70B-Instruct-HF"
+        base: "unsloth/Meta-Llama-3.1-70B-Instruct"
         alpha: 0.8
+        is_input: true
       - model: "another/finetuned-model"
+        base: "unsloth/Meta-Llama-3.1-70B-Instruct"
         alpha: 0.5
+        is_output: true
         start_layer: 2
         end_layer: -2
-    output_path: "merged_model"
+    output_dir: "merged_model"
     """
     # Setup logging
     setup_logging(verbose)

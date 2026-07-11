@@ -1,0 +1,29 @@
+# Example config for the core merge pipeline:
+#   uv run python -m shard merge configs/example-merge.yaml
+#
+# Each finetune_merge entry is a MergeModel (see shard/config.py):
+#   model       finetune to merge in (HF id, or dir under storage_dir)
+#   base        the base it was finetuned from (deltas = model - base)
+#   alpha       delta scale
+#   is_input    take embed_tokens from this model
+#   is_output   take model.norm / lm_head from this model
+#   start_layer / end_layer   restrict the delta to a layer window (-1 = end)
+
+output_base_model: "unsloth/Meta-Llama-3.1-70B-Instruct"
+output_dtype: "bfloat16"
+
+finetune_merge:
+  - model: "nvidia/Llama-3.1-Nemotron-70B-Instruct-HF"
+    base: "unsloth/Meta-Llama-3.1-70B-Instruct"
+    alpha: 0.3
+    is_input: true
+  - model: "another/finetuned-model"
+    base: "unsloth/Meta-Llama-3.1-70B-Instruct"
+    alpha: 0.5
+    is_output: true
+
+output_dir: "output_model"
+device: "cuda"          # or "cpu"
+clean_cache: false      # delete cached shards once fully consumed
+cache_dir: "cache"
+storage_dir: "storage"  # local models resolve as {storage_dir}/{org}/{name}/

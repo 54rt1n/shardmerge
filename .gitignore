@@ -10,4 +10,8 @@ research
 mise.toml
 codedb.snapshot
 out
-configs
+configs/*
+!configs/example-merge.yaml
+!configs/example-exlora.yaml
+!configs/example-nvfp4.yaml
+!configs/example-loramerge.yaml
