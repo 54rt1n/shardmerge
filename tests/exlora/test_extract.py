@@ -205,6 +205,34 @@ def test_rank_policy_error_or_signal_stops_at_noise_floor(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_nvfp4_skips_frozen_tensors(tmp_path):
+    """A surgical finetune must not spend a dense NVFP4 map on untouched weights."""
+    base, ft, _ = build_models(rank=4, seed=13)
+    # Freeze one of the two targeted linears: identical bits in base and finetune.
+    frozen = "model.layers.0.mlp.down_proj.weight"
+    moved = "model.layers.0.self_attn.q_proj.weight"
+    ft = dict(ft)
+    ft[frozen] = base[frozen].clone()
+    index = FakeIndex({"test/base": base, "test/ft": ft})
+
+    cfg = ExtractConfig(
+        base_model="test/base",
+        finetune_model="test/ft",
+        output_dir=str(tmp_path / "delta_map"),
+        artifact_type="nvfp4_residual",
+        dtype="float32",
+        device="cpu",
+    )
+    writer = await LoraExtractor(cfg, index_manager=index).extract()
+
+    assert set(writer.tensors) == {moved}
+    loaded = NVFP4ResidualMap.load(tmp_path / "delta_map")
+    # A missing tensor reads as "no delta", which is what a frozen weight means.
+    assert loaded.dequantize(frozen) is None
+    assert loaded.dequantize(moved) is not None
+
+
+@pytest.mark.asyncio
 async def test_extract_writes_nvfp4_residual_artifact(tmp_path):
     base, ft, deltas = build_models(rank=4, seed=11)
     index = FakeIndex({"test/base": base, "test/ft": ft})

@@ -62,6 +62,13 @@ class ExtractConfig:
 
     target_modules: List[str] = field(default_factory=lambda: list(DEFAULT_TARGET_MODULES))
 
+    # Weight-name prefixes to exclude even when the module suffix matches a
+    # target. Suffix matching alone cannot separate the decoder from auxiliary
+    # stacks that reuse the same module names -- e.g. Qwen3.6's speculative-
+    # decoding head (`mtp.layers.0.self_attn.q_proj.weight`) or a vision tower
+    # with `*_proj` submodules -- and those do not belong in a decoder adapter.
+    exclude_prefixes: List[str] = field(default_factory=list)
+
     # Also capture the token-embedding and/or LM-head (output projection) deltas
     # alongside the body, via the same artifact_type path. The LM head is the
     # readout; on a TIED base its head IS embed_tokens, so the lm_head delta is
@@ -121,6 +128,8 @@ class ExtractConfig:
         """True if ``layer_name`` is a targeted Linear weight."""
         if not layer_name.endswith(".weight"):
             return False
+        if any(layer_name.startswith(prefix) for prefix in self.exclude_prefixes):
+            return False
         module = layer_name[: -len(".weight")]
         return any(module.endswith(target) for target in self.target_modules)
 
@@ -158,6 +167,9 @@ class ExtractConfig:
 
         if "target_modules" in config and not isinstance(config["target_modules"], list):
             raise click.BadParameter("target_modules must be a list of module suffixes")
+
+        if "exclude_prefixes" in config and not isinstance(config["exclude_prefixes"], list):
+            raise click.BadParameter("exclude_prefixes must be a list of weight-name prefixes")
 
         # Ignore unknown keys rather than blowing up on extra YAML.
         known = cls.__dataclass_fields__.keys()

@@ -181,6 +181,26 @@ class TestIsTarget:
         assert cfg.is_target("model.layers.0.self_attn.q_proj.weight")
         assert not cfg.is_target("model.layers.0.self_attn.k_proj.weight")
 
+    def test_exclude_prefixes_beat_matching_suffixes(self):
+        # Qwen3.6's speculative-decoding head reuses the decoder module names.
+        cfg = ExtractConfig("b", "f", "o", exclude_prefixes=["mtp.", "model.visual."])
+        assert not cfg.is_target("mtp.layers.0.self_attn.q_proj.weight")
+        assert not cfg.is_target("mtp.layers.0.mlp.down_proj.weight")
+        assert cfg.is_target("model.language_model.layers.0.self_attn.q_proj.weight")
+
+    def test_exclude_prefixes_default_empty(self):
+        cfg = ExtractConfig("b", "f", "o")
+        assert cfg.exclude_prefixes == []
+        assert cfg.is_target("mtp.layers.0.self_attn.q_proj.weight")
+
+    def test_bad_exclude_prefixes_raises(self, tmp_path):
+        cfg_file = write_yaml(tmp_path, {
+            "base_model": "b", "finetune_model": "f", "output_dir": "o",
+            "exclude_prefixes": "mtp.",
+        })
+        with pytest.raises(click.BadParameter):
+            ExtractConfig.from_yaml(cfg_file)
+
 
 class TestModuleRankBounds:
     def test_module_of(self):

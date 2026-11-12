@@ -315,3 +315,64 @@ class TestInferenceEngine:
         assert len(call_args) >= 3
         assert call_args[0]["content"] == "First message"
         assert call_args[1]["content"] == "First response"
+
+
+class TestResolveModelClass:
+    """The auto-map resolves by model_type, which is the TEXT-ONLY class for a
+    multimodal checkpoint. Loading that against multimodal weights matches only
+    part of the state dict and generates token salad with no error raised."""
+
+    @patch("shard.inference.AutoConfig.from_pretrained")
+    def test_prefers_declared_architecture(self, mock_config):
+        import transformers
+        from shard.inference import resolve_model_class
+        cfg = Mock()
+        cfg.architectures = ["Qwen3_5ForConditionalGeneration"]
+        mock_config.return_value = cfg
+        resolved = resolve_model_class("some/model")
+        expected = getattr(transformers, "Qwen3_5ForConditionalGeneration", None)
+        if expected is not None:
+            assert resolved is expected
+            assert resolved is not transformers.AutoModelForCausalLM
+
+    @patch("shard.inference.AutoConfig.from_pretrained")
+    def test_falls_back_when_architecture_unknown(self, mock_config):
+        from transformers import AutoModelForCausalLM
+        from shard.inference import resolve_model_class
+        cfg = Mock()
+        cfg.architectures = ["NotARealArchitecture99"]
+        mock_config.return_value = cfg
+        assert resolve_model_class("some/model") is AutoModelForCausalLM
+
+    @patch("shard.inference.AutoConfig.from_pretrained")
+    def test_falls_back_when_no_architectures(self, mock_config):
+        from transformers import AutoModelForCausalLM
+        from shard.inference import resolve_model_class
+        cfg = Mock()
+        cfg.architectures = None
+        mock_config.return_value = cfg
+        assert resolve_model_class("some/model") is AutoModelForCausalLM
+
+    @patch("shard.inference.AutoConfig.from_pretrained", side_effect=OSError("no config"))
+    def test_falls_back_when_config_unreadable(self, _mock_config):
+        from transformers import AutoModelForCausalLM
+        from shard.inference import resolve_model_class
+        assert resolve_model_class("some/model") is AutoModelForCausalLM
+
+
+class TestMetaParameterGuard:
+    """A partially-matched state dict leaves parameters on meta and yields
+    garbage silently; callers that cannot offload should assert instead."""
+
+    def test_raises_on_meta_parameters(self):
+        import pytest
+        import torch
+        from shard.inference import assert_no_meta_parameters
+        model = torch.nn.Linear(4, 4, device="meta")
+        with pytest.raises(RuntimeError, match="meta device"):
+            assert_no_meta_parameters(model, context="in test")
+
+    def test_passes_on_real_parameters(self):
+        import torch
+        from shard.inference import assert_no_meta_parameters
+        assert_no_meta_parameters(torch.nn.Linear(4, 4)) is None

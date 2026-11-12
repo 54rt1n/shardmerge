@@ -263,6 +263,13 @@ class LoraExtractor:
         delta = await self._load_delta(layer_name, enc_device)
         if delta is None:
             return None
+        # Same frozen-tensor rule as the LoRA path: a bit-for-bit zero delta is
+        # a weight the finetune never touched. Encoding it would spend a full
+        # dense NVFP4 map on zeros, and consumers already read a missing tensor
+        # as "no delta" (see shard.loramerge.sources), so skip it.
+        if not bool(torch.any(delta != 0)):
+            logger.info(f"{layer_name}: frozen (zero delta), skipping")
+            return None
         shape = tuple(delta.shape)
         entry = build_nvfp4_residual_entry(
             delta,

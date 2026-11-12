@@ -44,6 +44,8 @@ class WeightedDeltaSource:
     pool_energy: float | None = None  # optional radial energy for this isometric pool
     pool_residual: float | None = None  # optional prior-subspace subtraction strength [0, 1]
     priority: float = 0.0         # rep fold order: higher folds first (anchors)
+    target_modules: list[str] | None = None  # restrict this source to these module names
+                                  # (e.g. rho-gating); None = every tensor the source provides
 
     @property
     def label(self) -> str:
@@ -483,7 +485,10 @@ def collect_source_deltas(
     deltas: list[torch.Tensor] = []
     weights: list[float] = []
     matched: list[WeightedDeltaSource] = []
+    module = tensor_name[: -len(".weight")].split(".")[-1] if tensor_name.endswith(".weight") else None
     for source in sources:
+        if source.target_modules is not None and module not in source.target_modules:
+            continue
         delta = source.source.delta(tensor_name, device=device, dtype=dtype)
         if delta is None:
             continue
@@ -499,6 +504,18 @@ def _norm_reference(deltas: Sequence[torch.Tensor], matched: Sequence["WeightedD
     if not refs:
         return None
     return sum(refs) / len(refs)
+
+
+def _whitener_for(whiteners: dict | None, tensor_name: str, in_dim: int):
+    """Input-side whitener lookup: module-suffix string keys first (three
+    different Grams share in_dim 5120), then the legacy in_dim keying."""
+    if not whiteners:
+        return None
+    for key, w in whiteners.items():
+        if isinstance(key, str) and f".{key}." in f".{tensor_name}" \
+                and w[0].shape[0] == in_dim:
+            return w
+    return whiteners.get(in_dim)
 
 
 def merge_full_frame_tensor(
@@ -567,21 +584,27 @@ def merge_full_frame_tensor(
         pool_ranks = [s.pool_rank for s in body_sources]
         pool_energies = [s.pool_energy for s in body_sources]
         pool_residuals = [s.pool_residual for s in body_sources]
+        whitener = _whitener_for(whiteners, tensor_name, int(base_fp32.shape[1])) \
+            if base_fp32.ndim == 2 else None
         if readout_whitener is not None and base_fp32.ndim == 2 \
                 and base_fp32.shape[0] == readout_whitener[0].shape[0]:
+            # Two-sided when an input whitener is also loaded (hebbian slot 2):
+            # output rows in the readout metric, input selection in the
+            # activation metric. whitener is None on legacy runs -> identical.
             Mh = readout_whitener[0].to(base_fp32.device, torch.float32)
             Mhi = readout_whitener[1].to(base_fp32.device, torch.float32)
             wbase, wdeltas = Mh @ base_fp32, [Mh @ d for d in body_deltas]
             if pooled:
                 merged_w = isometric_pooled_merge_delta(wbase, wdeltas, body_weights, pools, prios,
                                                         pool_ranks, pool_energies, pool_residuals,
-                                                        rank=isometric_rank, energy=isometric_energy)
+                                                        rank=isometric_rank, energy=isometric_energy,
+                                                        whitener=whitener)
             else:
                 merged_w = isometric_merge_delta(wbase, wdeltas, body_weights,
-                                                 rank=isometric_rank, energy=isometric_energy, whitener=None)
+                                                 rank=isometric_rank, energy=isometric_energy,
+                                                 whitener=whitener)
             merged_delta = (Mhi @ merged_w).to(base_fp32.device)
             return base_fp32 + add_post_overlays(merged_delta)
-        whitener = (whiteners or {}).get(int(base_fp32.shape[1])) if base_fp32.ndim == 2 else None
         if pooled:
             merged_delta = isometric_pooled_merge_delta(base_fp32, body_deltas, body_weights, pools, prios,
                                                         pool_ranks, pool_energies, pool_residuals,

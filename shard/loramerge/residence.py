@@ -136,7 +136,12 @@ def score_text(text: str, *, min_tokens: int = MIN_TOKENS) -> ResidenceScore:
 def score_rollout(rows: dict[str, str]) -> tuple[dict[str, ResidenceScore], bool]:
     """Score every ``tag -> text`` generation; pass only if all are ``ok``."""
     scores = {tag: score_text(text) for tag, text in rows.items()}
-    return scores, all(s.ok for s in scores.values())
+    return scores, count_passed(scores) == len(scores)
+
+
+def count_passed(scores: dict[str, ResidenceScore]) -> int:
+    """Count rollout scores that actually passed the residence gate."""
+    return sum(1 for score in scores.values() if score.ok)
 
 
 def render_scores(label: str, scores: dict[str, "ResidenceScore"]) -> list[str]:

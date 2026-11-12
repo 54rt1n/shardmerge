@@ -14,12 +14,61 @@
 # You should have received a copy of the GNU Lesser General Public License
 # along with this program. If not, see http://www.gnu.org/licenses/.
 
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel, PreTrainedTokenizerBase
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel, PreTrainedTokenizerBase
 import torch
 from typing import Optional
 import gc
+import logging
 from dataclasses import dataclass
 import json
+
+logger = logging.getLogger(__name__)
+
+
+def resolve_model_class(model_path: str):
+    """Return the model class the checkpoint's config actually declares.
+
+    ``AutoModelForCausalLM`` maps by ``model_type``, which for a multimodal
+    checkpoint resolves to the TEXT-ONLY class -- e.g. Qwen3.6's config declares
+    ``Qwen3_5ForConditionalGeneration`` (weights under ``model.language_model.*``)
+    but the auto-map yields ``Qwen3_5ForCausalLM``. That loads a partial state
+    dict, leaves the rest on the meta device, and generates fluent-looking token
+    salad with no error -- for the base model as readily as for a merge, so it
+    silently invalidates any evaluation run through it.
+
+    Falls back to ``AutoModelForCausalLM`` when the declared class is absent.
+    """
+    try:
+        config = AutoConfig.from_pretrained(model_path)
+    except Exception:
+        return AutoModelForCausalLM
+    architectures = getattr(config, "architectures", None) or []
+    if not architectures:
+        return AutoModelForCausalLM
+    import transformers
+    cls = getattr(transformers, architectures[0], None)
+    if cls is None:
+        logger.warning(
+            f"Config declares {architectures[0]!r}, which this transformers "
+            f"version does not export; falling back to AutoModelForCausalLM."
+        )
+        return AutoModelForCausalLM
+    return cls
+
+
+def assert_no_meta_parameters(model, context: str = ""):
+    """Raise if any parameter is still on the meta device.
+
+    Offloaded parameters are materialized per-forward by accelerate, but a
+    partially-matched state dict also leaves parameters on meta -- and that case
+    produces garbage output silently. Callers that cannot offload should assert.
+    """
+    meta = [n for n, p in model.named_parameters() if p.device.type == "meta"]
+    if meta:
+        raise RuntimeError(
+            f"{len(meta)} parameters are on the meta device{(' ' + context) if context else ''}; "
+            f"generation would produce garbage. First few: {meta[:3]}"
+        )
 
 @dataclass
 class ChatMessage:
@@ -106,8 +155,10 @@ class InferenceEngine:
                 "": "cpu",
             }
             
-        # Load model with appropriate configuration
-        model = AutoModelForCausalLM.from_pretrained(
+        # Load the DECLARED architecture, not the model_type auto-map: for a
+        # multimodal checkpoint the latter silently loads a partial state dict.
+        model_class = resolve_model_class(model_path)
+        model = model_class.from_pretrained(
             model_path,
             quantization_config=quantization_config,
             torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,

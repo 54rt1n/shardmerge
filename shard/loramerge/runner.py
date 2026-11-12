@@ -26,6 +26,22 @@ from .sources import CheckpointDeltaSource, load_delta_source
 
 CHECKPOINT_KINDS = {"checkpoint", "model_delta"}
 
+EMBED_TENSOR = "model.language_model.embed_tokens.weight"
+FINAL_NORM_TENSOR = "model.language_model.norm.weight"
+LM_HEAD_TENSOR = "lm_head.weight"
+
+# These architectures store the RMSNorm gain as an offset from one. Keep this
+# list explicit: guessing the convention from tensor values can silently build
+# the wrong readout metric, which is worse than refusing an unknown model.
+UNIT_OFFSET_RMSNORM_TYPES = {
+    "gemma3",
+    "gemma3_text",
+    "gemma4",
+    "gemma4_text",
+    "qwen3_5",
+    "qwen3_5_text",
+}
+
 MAX_SOURCE_GB = 12.0
 SAMPLE = [
     "model.language_model.layers.0.mlp.gate_proj.weight",
@@ -58,19 +74,72 @@ def load_whiteners(path, k=256, device="cuda"):
     return wh
 
 
+def _readout_spec(base_dir, weight_map):
+    """Return ``(head, final_norm, gain_offset, tied, model_type)``.
+
+    The output operator is the checkpoint's actual unembedding. An untied model
+    must therefore use ``lm_head.weight``; falling back to input embeddings
+    would define a different geometry. RMSNorm storage conventions are equally
+    architecture-specific, so unknown conventions fail closed.
+    """
+    base_dir = Path(base_dir)
+    with open(base_dir / "config.json") as f:
+        cfg = json.load(f)
+    text_cfg = cfg.get("text_config") if isinstance(cfg.get("text_config"), dict) else {}
+    model_types = {cfg.get("model_type"), text_cfg.get("model_type")}
+    verified_types = sorted(t for t in model_types if t in UNIT_OFFSET_RMSNORM_TYPES)
+    if not verified_types:
+        known = ", ".join(sorted(t for t in model_types if t)) or "unknown"
+        raise ValueError(
+            f"unsupported RMSNorm weight convention for model_type={known}; "
+            "add an explicitly verified convention before using --readout"
+        )
+
+    tied = text_cfg.get("tie_word_embeddings", cfg.get("tie_word_embeddings"))
+    if LM_HEAD_TENSOR in weight_map:
+        head_name = LM_HEAD_TENSOR
+    elif tied is True and EMBED_TENSOR in weight_map:
+        head_name = EMBED_TENSOR
+    elif tied is False:
+        raise ValueError(
+            f"untied checkpoint is missing {LM_HEAD_TENSOR}; refusing to use "
+            f"{EMBED_TENSOR} as the output readout"
+        )
+    else:
+        raise ValueError(
+            "cannot resolve the output readout: checkpoint has no lm_head.weight "
+            "and does not explicitly declare tied word embeddings"
+        )
+    if FINAL_NORM_TENSOR not in weight_map:
+        raise ValueError(f"checkpoint is missing final norm tensor {FINAL_NORM_TENSOR}")
+    return head_name, FINAL_NORM_TENSOR, 1.0, tied, verified_types[-1]
+
+
 def build_readout_whitener(base_dir, device="cuda", damp_rel=1e-3):
     """(M^½, damped M^{-½}) for the LM-head readout metric M = U_effᵀ U_eff,
-    U_eff = embed_tokens·diag(1+γ_final). Output-side whitener: the isometric merge
-    runs in this metric for residual-stream writers (out_dim == hidden), so rank is
-    spent on readout-live directions, not top-Frobenius (research/RESULTS_READOUT_NORM_RANK)."""
+    U_eff = output_head·diag(1+γ_final) for the currently supported Gemma4
+    and Qwen3.5/3.6 architectures. Output-side whitener: the isometric merge runs
+    in this metric for residual-stream writers (out_dim == hidden), so rank is
+    spent on readout-live directions, not top-Frobenius
+    (research/RESULTS_READOUT_NORM_RANK)."""
     from safetensors import safe_open
-    wm = json.load(open(f"{base_dir}/model.safetensors.index.json"))["weight_map"]
+    base_dir = Path(base_dir)
+    with open(base_dir / "model.safetensors.index.json") as f:
+        wm = json.load(f)["weight_map"]
+    head_name, norm_name, gain_offset, tied, model_type = _readout_spec(base_dir, wm)
 
     def g(n):
-        with safe_open(f"{base_dir}/{wm[n]}", framework="pt") as f:
+        with safe_open(str(base_dir / wm[n]), framework="pt") as f:
             return f.get_tensor(n).to(device, torch.float32)
 
-    Ueff = g("model.language_model.embed_tokens.weight") * (1.0 + g("model.language_model.norm.weight")).unsqueeze(0)
+    gain = gain_offset + g(norm_name)
+    Ueff = g(head_name) * gain.unsqueeze(0)
+    print(
+        f"  readout operator: head={head_name}, norm={norm_name}, "
+        f"gain=(1+weight), tied={tied}, model_type={model_type}",
+        flush=True,
+    )
+    del gain
     M = (Ueff.T @ Ueff).double(); del Ueff
     lam, V = torch.linalg.eigh(M)
     lam = lam.clamp_min(0); sq = lam.sqrt()
@@ -101,7 +170,7 @@ def load_weighted_sources(cfg, *, enable_all=False):
                                            is_norm=s.is_norm, name=s.name, post_merge=s.post_merge,
                                            group=s.group, pool=s.pool, pool_rank=s.pool_rank,
                                            pool_energy=s.pool_energy, pool_residual=s.pool_residual,
-                                           priority=s.priority)))
+                                           priority=s.priority, target_modules=s.target_modules)))
     return out
 
 
@@ -268,9 +337,24 @@ def main():
     ap.add_argument("--rank", type=int, default=None, help="override isometric_rank")
     ap.add_argument("--energy", type=float, default=None, help="override isometric_energy (radial reintroduction)")
     ap.add_argument("--grams", default=None, help="activation Gram file -> H-weighted (behavioral) subspace")
+    ap.add_argument("--hebbian-grams", default=None,
+                    help="suffix-keyed harvest file (shard.hebbian.harvest) -> input-side "
+                         "H^(alpha/2) subspace selection; composes with --readout (two-sided)")
+    ap.add_argument("--hebbian-k", type=int, default=256)
+    ap.add_argument("--hebbian-alpha", type=float, default=1.0,
+                    help="metric damping exponent: 1.0 = H^1/2, 0.5 = H^1/4, ->0 = Frobenius")
     ap.add_argument("--readout", action="store_true",
                     help="isometric merge in the LM-head readout norm (output-side whitener) for residual writers")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="RNG seed. The isometric rule uses torch.svd_lowrank, which draws a "
+                         "random projection: unseeded, two builds of the SAME config differ by "
+                         "relDelta ~0.003, comparable to the difference between configs, which "
+                         "silently confounds any A/B between merge variants.")
     args = ap.parse_args()
+
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
     cfg = LoraMergeConfig.from_yaml(args.config)
     if args.rule:
@@ -281,6 +365,10 @@ def main():
         cfg.isometric_energy = args.energy
     if args.grams:
         cfg._whiteners = load_whiteners(args.grams, device=args.device)
+    if args.hebbian_grams:
+        from shard.hebbian.whitener import load_hebbian_whiteners
+        cfg._whiteners = load_hebbian_whiteners(
+            args.hebbian_grams, k=args.hebbian_k, alpha=args.hebbian_alpha)
     base_dir = f"{cfg.storage_dir}/{cfg.base_model}"
     if args.readout:
         cfg._readout_whitener = build_readout_whitener(base_dir, device=args.device)
